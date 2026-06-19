@@ -313,8 +313,67 @@ function estimateSizeKB(frames: number, particles: number): string {
         </div>
       </div>
 
+      <!-- Storage Warning -->
+      <div
+        v-if="store.storageError"
+        class="mb-3 bg-amber-900/30 border border-amber-700 rounded px-3 py-2 text-xs text-amber-200"
+      >
+        <div class="flex items-start gap-2">
+          <span class="text-amber-400 text-base leading-none">⚠</span>
+          <div class="flex-1">
+            <p>{{ store.storageError }}</p>
+            <button
+              @click="store.clearStorageError()"
+              class="mt-1 text-amber-400 hover:text-amber-300 underline underline-offset-2"
+            >
+              关闭提示
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Storage Info -->
+      <div
+        v-if="store.recordings.length > 0"
+        class="mb-3 bg-gray-900/70 border rounded px-3 py-2 text-xs"
+        :class="store.storageNearLimit ? 'border-amber-700' : 'border-gray-700'"
+      >
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-gray-400">本地存储</span>
+          <div class="flex items-center gap-2">
+            <span
+              class="font-mono"
+              :class="store.storageNearLimit ? 'text-amber-400' : 'text-gray-300'"
+            >
+              {{ store.storageUsedMB }} MB
+            </span>
+            <span v-if="store.isPersisting" class="text-green-400 flex items-center gap-1">
+              <span class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+              保存中
+            </span>
+            <button
+              @click="store.clearAllRecordings()"
+              class="text-red-400 hover:text-red-300 transition"
+              title="清空所有录制"
+            >
+              🗑 清空
+            </button>
+          </div>
+        </div>
+        <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+          <div
+            class="h-full transition-all duration-300 rounded-full"
+            :class="store.storageNearLimit ? 'bg-amber-500' : 'bg-blue-500'"
+            :style="{ width: `${Math.min((store.storageUsedBytes / (8 * 1024 * 1024)) * 100, 100)}%` }"
+          ></div>
+        </div>
+        <p class="text-[10px] text-gray-500 mt-1">
+          浏览器存储空间有限（约 5-10 MB），重要录制请使用"导出"功能保存为文件。
+        </p>
+      </div>
+
       <!-- Recording List -->
-      <div v-if="store.recordings.length > 0" class="space-y-2 max-h-64 overflow-auto pr-1">
+      <div v-if="store.recordings.length > 0" class="space-y-2 max-h-52 overflow-auto pr-1">
         <div
           v-for="rec in [...store.recordings].reverse()"
           :key="rec.id"

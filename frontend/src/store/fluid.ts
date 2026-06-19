@@ -1,11 +1,14 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { SPHEngine, DEFAULT_PARAMS, PRESETS } from '../utils/sph-engine'
 import type { SimParams, Preset, Recording, PlaybackSpeed, FrameSnapshot, Particle } from '../types'
 
 const CANVAS_W = 800
 const CANVAS_H = 500
 const DEFAULT_PLAYBACK_FPS = 30
+const STORAGE_KEY = 'sph-fluid-recordings-v1'
+const STORAGE_WARN_THRESHOLD = 4 * 1024 * 1024 // 4MB 警告
+const STORAGE_MAX_SOFT = 8 * 1024 * 1024 // 8MB 软限制
 
 // inline poly6 for density recompute in playback
 function poly6(r: number, h: number): number {
@@ -14,6 +17,10 @@ function poly6(r: number, h: number): number {
   const r2 = r * r
   const coeff = 315 / (64 * Math.PI * Math.pow(h, 9))
   return coeff * Math.pow(h2 - r2, 3)
+}
+
+function estimateRecordingBytes(rec: Recording): number {
+  return rec.frames.length * rec.particleCount * 16 // 4 floats × 4 bytes
 }
 
 export const useFluidStore = defineStore('fluid', () => {
@@ -37,6 +44,9 @@ export const useFluidStore = defineStore('fluid', () => {
   let _recordedFrames: FrameSnapshot[] = []
   let _recordStartSimFps = 0
   const recordings = ref<Recording[]>([])
+  const storageError = ref<string | null>(null)
+  const storageUsedBytes = ref(0)
+  const isPersisting = ref(false)
 
   // ============ Playback State ============
   const isPlayback = ref(false)
@@ -74,6 +84,131 @@ export const useFluidStore = defineStore('fluid', () => {
     if (!rec || rec.fps === 0) return 0
     return playbackFrame.value / rec.fps
   })
+  const storageUsedKB = computed(() => (storageUsedBytes.value / 1024).toFixed(1))
+  const storageUsedMB = computed(() => (storageUsedBytes.value / 1024 / 1024).toFixed(2))
+  const storageNearLimit = computed(() => storageUsedBytes.value >= STORAGE_WARN_THRESHOLD)
+
+  // ============ Persistence ============
+  function _recalcStorageUsed() {
+    storageUsedBytes.value = recordings.value.reduce(
+      (sum, rec) => sum + estimateRecordingBytes(rec),
+      0
+    )
+  }
+
+  async function _persistToStorage(): Promise<{ success: boolean; error?: string }> {
+    if (typeof localStorage === 'undefined') {
+      return { success: false, error: '当前环境不支持 localStorage' }
+    }
+    isPersisting.value = true
+    storageError.value = null
+    try {
+      const totalBytes = recordings.value.reduce(
+        (sum, rec) => sum + estimateRecordingBytes(rec),
+        0
+      )
+      if (totalBytes > STORAGE_MAX_SOFT) {
+        const msg = `录制数据过大（约 ${(totalBytes / 1024 / 1024).toFixed(2)} MB），可能超出浏览器存储限制。请导出为文件保存或删除部分旧录制。`
+        storageError.value = msg
+        return { success: false, error: msg }
+      }
+
+      const json = JSON.stringify(recordings.value)
+      localStorage.setItem(STORAGE_KEY, json)
+      _recalcStorageUsed()
+
+      if (totalBytes >= STORAGE_WARN_THRESHOLD) {
+        storageError.value = `已使用约 ${(totalBytes / 1024 / 1024).toFixed(2)} MB 存储空间，接近浏览器限制，建议及时导出重要录制。`
+      }
+      return { success: true }
+    } catch (e: any) {
+      let msg = '保存失败'
+      if (e?.name === 'QuotaExceededError' || e?.message?.includes('quota')) {
+        msg = '浏览器存储空间已满！请删除部分旧录制或导出为文件保存。'
+      } else if (e?.message) {
+        msg = e.message
+      }
+      storageError.value = msg
+      console.error('[fluid store] persist error:', e)
+      return { success: false, error: msg }
+    } finally {
+      isPersisting.value = false
+    }
+  }
+
+  function _loadFromStorage() {
+    if (typeof localStorage === 'undefined') return
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (!raw) return
+      const data = JSON.parse(raw) as Recording[]
+      if (Array.isArray(data)) {
+        const valid: Recording[] = []
+        for (const rec of data) {
+          if (
+            rec &&
+            typeof rec.id === 'string' &&
+            typeof rec.name === 'string' &&
+            Array.isArray(rec.frames) &&
+            rec.frames.length > 0 &&
+            rec.params &&
+            typeof rec.particleCount === 'number'
+          ) {
+            valid.push(rec)
+          }
+        }
+        recordings.value = valid
+        _recalcStorageUsed()
+        if (valid.length > 0 && valid.length !== data.length) {
+          console.warn(`[fluid store] 已跳过 ${data.length - valid.length} 条损坏的录制数据`)
+        }
+      }
+    } catch (e) {
+      console.error('[fluid store] load from storage error:', e)
+    }
+  }
+
+  function clearStorageError() {
+    storageError.value = null
+  }
+
+  async function clearAllRecordings(): Promise<boolean> {
+    if (!confirm('确定要删除所有已保存的录制吗？此操作不可撤销。')) {
+      return false
+    }
+    stopPlayback()
+    recordings.value = []
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch (e) {
+      console.error('[fluid store] clear storage error:', e)
+    }
+    _recalcStorageUsed()
+    storageError.value = null
+    return true
+  }
+
+  let _persistTimeout: number | null = null
+  watch(
+    recordings,
+    () => {
+      if (_persistTimeout !== null) {
+        clearTimeout(_persistTimeout)
+      }
+      _persistTimeout = window.setTimeout(() => {
+        _persistToStorage()
+      }, 300)
+    },
+    { deep: true }
+  )
+
+  try {
+    if (typeof window !== 'undefined') {
+      _loadFromStorage()
+    }
+  } catch (e) {
+    // ignore
+  }
 
   // ============ Simulation Actions ============
   function initSimulation(preset?: Preset) {
@@ -172,7 +307,7 @@ export const useFluidStore = defineStore('fluid', () => {
     _recordedFrames.push(engine.value.snapshot())
   }
 
-  function stopRecording() {
+  async function stopRecording() {
     if (!isRecording.value) return
     isRecording.value = false
     if (_recordedFrames.length === 0) return
@@ -194,7 +329,24 @@ export const useFluidStore = defineStore('fluid', () => {
       canvasHeight: CANVAS_H,
       fps: _recordStartSimFps > 0 ? _recordStartSimFps : DEFAULT_PLAYBACK_FPS,
     }
+
+    const estimatedSize = estimateRecordingBytes(rec)
+    const totalAfter = storageUsedBytes.value + estimatedSize
+    if (totalAfter > STORAGE_MAX_SOFT) {
+      const choice = confirm(
+        `本次录制约 ${(estimatedSize / 1024 / 1024).toFixed(2)} MB，` +
+        `加上已有数据共 ${(totalAfter / 1024 / 1024).toFixed(2)} MB，` +
+        `可能超出浏览器存储上限。\n\n是否仍然保存？\n` +
+        `（建议：点击"取消"后使用"导出"功能保存为文件）`
+      )
+      if (!choice) return
+    }
+
     recordings.value.push(rec)
+    const result = await _persistToStorage()
+    if (!result.success && result.error) {
+      alert(result.error)
+    }
   }
 
   function renameRecording(id: string, name: string) {
@@ -234,6 +386,10 @@ export const useFluidStore = defineStore('fluid', () => {
       }
       rec.id = `rec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
       recordings.value.push(rec)
+      const result = await _persistToStorage()
+      if (!result.success && result.error) {
+        alert(result.error)
+      }
     } catch (e) {
       console.error('导入录制失败:', e)
       alert('导入录制失败：文件格式不正确')
@@ -247,7 +403,6 @@ export const useFluidStore = defineStore('fluid', () => {
     const frame = rec.frames[playbackFrame.value]
     if (frame) {
       engine.value.restore(frame)
-      // Recompute density/pressure for stats display
       const { smoothingRadius, restDensity, gasConstant, particleMass } = engine.value.params
       const h = smoothingRadius
       const m = particleMass
@@ -381,6 +536,12 @@ export const useFluidStore = defineStore('fluid', () => {
     isRecording,
     _recordedFrames,
     recordings,
+    storageError,
+    storageUsedBytes,
+    storageUsedKB,
+    storageUsedMB,
+    storageNearLimit,
+    isPersisting,
     isPlayback,
     isPlaybackPaused,
     currentRecordingId,
@@ -416,5 +577,7 @@ export const useFluidStore = defineStore('fluid', () => {
     setPlaybackFrame,
     setPlaybackSpeed,
     stopPlayback,
+    clearStorageError,
+    clearAllRecordings,
   }
 })
