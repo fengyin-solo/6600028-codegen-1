@@ -1,4 +1,4 @@
-import type { Particle, SimParams, Preset } from '../types'
+import type { Particle, SimParams, Preset, FrameSnapshot, ParticleSnapshot } from '../types'
 
 export const DEFAULT_PARAMS: SimParams = {
   gravity: 9.8,
@@ -89,7 +89,7 @@ export class SPHEngine {
   }
 
   initParticles(config: 'dam' | 'drop' | 'fountain' | 'wave', count?: number) {
-    const n = count ?? this.particles.length || 800
+    const n = count ?? (this.particles.length || 800)
     this.particles = []
 
     switch (config) {
@@ -323,6 +323,28 @@ export class SPHEngine {
         p.vx += (dx / dist) * factor
         p.vy += (dy / dist) * factor
       }
+    }
+  }
+
+  snapshot(): FrameSnapshot {
+    const n = this.particles.length
+    const particles: ParticleSnapshot[] = new Array(n)
+    for (let i = 0; i < n; i++) {
+      const p = this.particles[i]
+      particles[i] = { x: p.x, y: p.y, vx: p.vx, vy: p.vy }
+    }
+    return { particles }
+  }
+
+  restore(snapshot: FrameSnapshot) {
+    const n = Math.min(snapshot.particles.length, this.particles.length)
+    for (let i = 0; i < n; i++) {
+      const s = snapshot.particles[i]
+      const p = this.particles[i]
+      p.x = s.x
+      p.y = s.y
+      p.vx = s.vx
+      p.vy = s.vy
     }
   }
 }
